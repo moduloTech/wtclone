@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# wtclone — bootstrap a git repo in worktree layout.
+#
+# Creates $WTCLONE_ROOT/<name>/{.bare/,.git,<default_branch>/} from a remote URL.
+# Project-name derivation mirrors bin/dev's derive_project_from_remote (with the
+# normalize-before-compare fix). See CLAUDE.md for the invariant.
+
+set -euo pipefail
+
+WTCLONE_VERSION="0.1.0"
+
+usage() {
+  cat <<'EOF'
+Usage: wtclone <git-remote-url> [name]
+
+Clones a git repository into a worktree layout under $WTCLONE_ROOT
+(default: $HOME/Projects):
+
+    <root>/<name>/
+      .bare/              bare clone
+      .git                pointer file ("gitdir: ./.bare")
+      <default_branch>/   initial worktree
+
+Arguments:
+  <git-remote-url>   SSH or HTTPS git URL (required)
+  [name]             Override derived project name (optional)
+
+Environment:
+  WTCLONE_ROOT       Root directory for projects (default: $HOME/Projects)
+
+On success, prints the absolute path of the created worktree on stdout
+(last line). Informational logs go to stderr. Use the shell wrapper
+documented in CLAUDE.md to cd into the worktree automatically.
+EOF
+}
+
+die() { printf 'wtclone: %s\n' "$*" >&2; exit 1; }
+
+normalize() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_' '-'
+}
+
+validate_dns_label() {
+  local label="$1" max_len=50
+  if [ -z "$label" ]; then
+    die "derived name is empty"
+  fi
+  if [ ${#label} -gt $max_len ]; then
+    die "name '$label' exceeds $max_len chars"
+  fi
+  if ! printf '%s' "$label" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
+    die "name '$label' is not a valid DNS label (allowed: [a-z0-9-], no leading/trailing hyphen)"
+  fi
+}
+
+derive_name_from_url() {
+  local url="$1" path repo parent
+  # Strip "user@host:" (SCP-style SSH) OR "scheme://host/"; then strip trailing .git
+  path=$(printf '%s' "$url" | sed -E 's|^[^:]+:||; s|^[a-z]+://[^/]+/||; s|\.git$||')
+  [ -n "$path" ] || die "cannot parse path from URL: $url"
+  repo=$(basename "$path")
+  parent=$(basename "$(dirname "$path")")
+  # Normalize BEFORE comparison so e.g. foo_bar/foo-bar dedups to foo-bar.
+  repo=$(normalize "$repo")
+  parent=$(normalize "$parent")
+  if [ "$parent" = "." ] || [ "$parent" = "/" ] || [ -z "$parent" ] || [ "$repo" = "$parent" ]; then
+    printf '%s\n' "$repo"
+  else
+    printf '%s-%s\n' "$parent" "$repo"
+  fi
+}
+
+wtclone_main() {
+  case "${1:-}" in
+    -h|--help)    usage; exit 0 ;;
+    -v|--version) printf 'wtclone %s\n' "$WTCLONE_VERSION"; exit 0 ;;
+    '')           usage >&2; exit 2 ;;
+  esac
+
+  local url="$1" name="${2:-}"
+
+  if [ -z "$name" ]; then
+    name=$(derive_name_from_url "$url")
+  else
+    name=$(normalize "$name")
+  fi
+  validate_dns_label "$name"
+
+  local root="${WTCLONE_ROOT:-$HOME/Projects}"
+  local target="$root/$name"
+  [ ! -e "$target" ] || die "target exists: $target"
+
+  mkdir -p "$target"
+  cd "$target"
+
+  printf 'wtclone: cloning %s into %s/.bare\n' "$url" "$target" >&2
+  # Redirect git stdout to stderr so our final stdout line is the worktree path.
+  git clone --bare "$url" .bare 1>&2
+
+  printf 'gitdir: ./.bare\n' > .git
+
+  local default_branch
+  default_branch=$(git --git-dir=.bare symbolic-ref --short HEAD 2>/dev/null) \
+    || die "remote has no default branch (HEAD unresolved); clone kept at $target"
+
+  printf 'wtclone: creating worktree %s\n' "$default_branch" >&2
+  git worktree add "$default_branch" 1>&2
+
+  printf '%s\n' "$target/$default_branch"
+}
+
+# Only run main when executed directly (not when sourced by tests).
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  wtclone_main "$@"
+fi
