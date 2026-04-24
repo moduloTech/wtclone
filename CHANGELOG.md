@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-04-24
+
 ### Added
 
 - Initial release. `wtclone <git-url> [name]` bootstraps a git repository in worktree layout under `$WTCLONE_ROOT` (default `$HOME/Projects`): bare clone at `.bare/`, pointer file at `.git`, and an initial worktree on the remote's default branch.
