@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-24
+
 ### Added
 
 - Subcommand-based CLI: `init`, `add`, `rm`, `fix`. The legacy positional form `wtclone <url> [name]` is preserved as a shortcut for `init`.
