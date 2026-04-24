@@ -1,40 +1,42 @@
 #!/usr/bin/env bash
-# wtclone — bootstrap a git repo in worktree layout.
+# wtclone — bootstrap a git repo in worktree layout and manage worktrees.
 #
-# Creates $WTCLONE_ROOT/<name>/{.bare/,.git,<default_branch>/} from a remote URL.
-# Project-name derivation mirrors bin/dev's derive_project_from_remote (with the
-# normalize-before-compare fix). See CLAUDE.md for the invariant.
+# Subcommands:
+#   init <url> [name]   clone + safe fetch refspec + default-branch worktree
+#   add <branch> [base] add a worktree, tracking origin/<branch> if present
+#   rm <branch>         remove a worktree safely (checks uncommitted / unpushed)
+#   fix                 migrate a <= 0.1.0 layout to the safe fetch refspec
+#
+# Shortcut: `wtclone <url> [name]` is equivalent to `wtclone init <url> [name]`.
 
 set -euo pipefail
 
 WTCLONE_VERSION="0.1.0"
+SAFE_FETCH_REFSPEC='+refs/heads/*:refs/remotes/origin/*'
 
 usage() {
   cat <<'EOF'
-Usage: wtclone <git-remote-url> [name]
-
-Clones a git repository into a worktree layout under $WTCLONE_ROOT
-(default: $HOME/Projects):
-
-    <root>/<name>/
-      .bare/              bare clone
-      .git                pointer file ("gitdir: ./.bare")
-      <default_branch>/   initial worktree
-
-Arguments:
-  <git-remote-url>   SSH or HTTPS git URL (required)
-  [name]             Override derived project name (optional)
+Usage:
+  wtclone <git-url> [name]          shortcut for `wtclone init <git-url> [name]`
+  wtclone init <git-url> [name]     clone into worktree layout and create default-branch worktree
+  wtclone add <branch> [base]       add a worktree; tracks origin/<branch> if it exists,
+                                    else creates a new branch from [base] (default: origin/HEAD)
+  wtclone rm <branch> [options]     remove a worktree safely
+                                      --force        skip uncommitted/unpushed checks
+                                      --keep-branch  keep the local branch ref
+  wtclone fix                       migrate a pre-0.2.0 layout to the safe fetch refspec
+                                    and set upstream on existing worktrees
 
 Environment:
-  WTCLONE_ROOT       Root directory for projects (default: $HOME/Projects)
+  WTCLONE_ROOT                      root directory for new projects (default: $HOME/Projects)
 
-On success, prints the absolute path of the created worktree on stdout
-(last line). Informational logs go to stderr. Use the shell wrapper
-documented in CLAUDE.md to cd into the worktree automatically.
+On successful init/add, the absolute path of the created worktree is printed as the
+last line on stdout. All other output goes to stderr so a shell wrapper can `cd "$(wtclone ...)"`.
 EOF
 }
 
 die() { printf 'wtclone: %s\n' "$*" >&2; exit 1; }
+log() { printf 'wtclone: %s\n' "$*" >&2; }
 
 normalize() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr '_' '-'
@@ -42,25 +44,18 @@ normalize() {
 
 validate_dns_label() {
   local label="$1" max_len=50
-  if [ -z "$label" ]; then
-    die "derived name is empty"
-  fi
-  if [ ${#label} -gt $max_len ]; then
-    die "name '$label' exceeds $max_len chars"
-  fi
-  if ! printf '%s' "$label" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
-    die "name '$label' is not a valid DNS label (allowed: [a-z0-9-], no leading/trailing hyphen)"
-  fi
+  [ -n "$label" ] || die "derived name is empty"
+  [ ${#label} -le $max_len ] || die "name '$label' exceeds $max_len chars"
+  printf '%s' "$label" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$' \
+    || die "name '$label' is not a valid DNS label (allowed: [a-z0-9-], no leading/trailing hyphen)"
 }
 
 derive_name_from_url() {
   local url="$1" path repo parent
-  # Strip "user@host:" (SCP-style SSH) OR "scheme://host/"; then strip trailing .git
   path=$(printf '%s' "$url" | sed -E 's|^[^:]+:||; s|^[a-z]+://[^/]+/||; s|\.git$||')
   [ -n "$path" ] || die "cannot parse path from URL: $url"
   repo=$(basename "$path")
   parent=$(basename "$(dirname "$path")")
-  # Normalize BEFORE comparison so e.g. foo_bar/foo-bar dedups to foo-bar.
   repo=$(normalize "$repo")
   parent=$(normalize "$parent")
   if [ "$parent" = "." ] || [ "$parent" = "/" ] || [ -z "$parent" ] || [ "$repo" = "$parent" ]; then
@@ -70,14 +65,30 @@ derive_name_from_url() {
   fi
 }
 
-wtclone_main() {
-  case "${1:-}" in
-    -h|--help)    usage; exit 0 ;;
-    -v|--version) printf 'wtclone %s\n' "$WTCLONE_VERSION"; exit 0 ;;
-    '')           usage >&2; exit 2 ;;
-  esac
+# Walk up from PWD looking for a wtclone layout (.bare/ + .git pointer file).
+find_layout_root() {
+  local dir="$PWD"
+  while [ -n "$dir" ] && [ "$dir" != "/" ]; do
+    if [ -d "$dir/.bare" ] && [ -f "$dir/.git" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    dir=$(dirname "$dir")
+  done
+  return 1
+}
 
-  local url="$1" name="${2:-}"
+ensure_layout() {
+  local root
+  root=$(find_layout_root) || die "not inside a wtclone layout (no .bare/ with .git pointer found)"
+  cd "$root"
+}
+
+# ---- cmd_init ------------------------------------------------------------
+
+cmd_init() {
+  local url="${1:-}" name="${2:-}"
+  [ -n "$url" ] || { usage >&2; exit 2; }
 
   if [ -z "$name" ]; then
     name=$(derive_name_from_url "$url")
@@ -93,20 +104,175 @@ wtclone_main() {
   mkdir -p "$target"
   cd "$target"
 
-  printf 'wtclone: cloning %s into %s/.bare\n' "$url" "$target" >&2
-  # Redirect git stdout to stderr so our final stdout line is the worktree path.
+  log "cloning $url into $target/.bare"
   git clone --bare "$url" .bare 1>&2
-
   printf 'gitdir: ./.bare\n' > .git
+
+  # Switch to safe refspec and re-fetch so origin/* refs populate.
+  git --git-dir=.bare config remote.origin.fetch "$SAFE_FETCH_REFSPEC"
+  git --git-dir=.bare fetch origin --prune 1>&2
 
   local default_branch
   default_branch=$(git --git-dir=.bare symbolic-ref --short HEAD 2>/dev/null) \
     || die "remote has no default branch (HEAD unresolved); clone kept at $target"
 
-  printf 'wtclone: creating worktree %s\n' "$default_branch" >&2
-  git worktree add "$default_branch" 1>&2
+  # Delete the mirrored refs/heads/* populated by `clone --bare` — they are
+  # stale the moment the refspec changes. The worktree-add below will recreate
+  # refs/heads/<default_branch> pointing at origin/<default_branch>.
+  git --git-dir=.bare for-each-ref --format='delete %(refname)' refs/heads/ \
+    | git --git-dir=.bare update-ref --stdin
+
+  # Wire refs/remotes/origin/HEAD so future add/fix calls know the default
+  # branch without a network round-trip.
+  git --git-dir=.bare symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$default_branch"
+
+  log "creating worktree $default_branch tracking origin/$default_branch"
+  git worktree add -b "$default_branch" "$default_branch" "origin/$default_branch" 1>&2
 
   printf '%s\n' "$target/$default_branch"
+}
+
+# ---- cmd_add -------------------------------------------------------------
+
+cmd_add() {
+  local branch="${1:-}" base="${2:-}"
+  [ -n "$branch" ] || die "usage: wtclone add <branch> [base]"
+
+  ensure_layout
+
+  if git --git-dir=.bare show-ref --verify --quiet "refs/heads/$branch"; then
+    die "branch '$branch' already exists locally; use 'git worktree add $branch' directly"
+  fi
+
+  log "fetching origin"
+  git --git-dir=.bare fetch origin --prune 1>&2
+
+  if git --git-dir=.bare show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    log "worktree $branch will track origin/$branch"
+    git worktree add -b "$branch" "$branch" "origin/$branch" 1>&2
+  else
+    if [ -z "$base" ]; then
+      base=$(git --git-dir=.bare symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null) \
+        || die "origin/HEAD not set and no base provided; run 'wtclone fix' or pass a base explicitly"
+    fi
+    log "worktree $branch will be a new branch off $base (no upstream)"
+    git worktree add --no-track -b "$branch" "$branch" "$base" 1>&2
+  fi
+
+  printf '%s\n' "$PWD/$branch"
+}
+
+# ---- cmd_rm --------------------------------------------------------------
+
+cmd_rm() {
+  local branch="" force=false keep_branch=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force)        force=true ;;
+      --keep-branch)  keep_branch=true ;;
+      -*)             die "unknown option: $1" ;;
+      *)
+        [ -z "$branch" ] || die "unexpected argument: $1"
+        branch="$1"
+        ;;
+    esac
+    shift
+  done
+  [ -n "$branch" ] || die "usage: wtclone rm <branch> [--force] [--keep-branch]"
+
+  ensure_layout
+
+  local wt_path
+  wt_path=$(git --git-dir=.bare worktree list --porcelain | awk -v b="refs/heads/$branch" '
+    $1=="worktree" { path=$2 }
+    $1=="branch" && $2==b { print path; found=1; exit }
+    END { exit !found }
+  ') || die "no worktree found on branch '$branch'"
+
+  if ! $force; then
+    if [ -n "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ]; then
+      die "worktree '$wt_path' has uncommitted changes (use --force to override)"
+    fi
+    local upstream unpushed
+    upstream=$(git -C "$wt_path" rev-parse --abbrev-ref "$branch@{upstream}" 2>/dev/null || true)
+    if [ -n "$upstream" ]; then
+      unpushed=$(git -C "$wt_path" rev-list --count "$upstream..$branch" 2>/dev/null || echo 0)
+      [ "$unpushed" -eq 0 ] || die "branch '$branch' has $unpushed unpushed commit(s) vs $upstream (use --force)"
+    fi
+  fi
+
+  log "removing worktree $wt_path"
+  if $force; then
+    git --git-dir=.bare worktree remove --force "$wt_path" 1>&2
+  else
+    git --git-dir=.bare worktree remove "$wt_path" 1>&2
+  fi
+
+  if ! $keep_branch; then
+    if git --git-dir=.bare show-ref --verify --quiet "refs/heads/$branch"; then
+      log "deleting local branch $branch"
+      git --git-dir=.bare branch -D "$branch" 1>&2
+    fi
+  fi
+}
+
+# ---- cmd_fix -------------------------------------------------------------
+
+cmd_fix() {
+  ensure_layout
+
+  local current
+  current=$(git --git-dir=.bare config remote.origin.fetch 2>/dev/null || true)
+  if [ "$current" != "$SAFE_FETCH_REFSPEC" ]; then
+    log "rewriting remote.origin.fetch: '$current' -> '$SAFE_FETCH_REFSPEC'"
+    git --git-dir=.bare config remote.origin.fetch "$SAFE_FETCH_REFSPEC"
+  else
+    log "refspec already safe"
+  fi
+
+  log "fetching origin"
+  git --git-dir=.bare fetch origin --prune 1>&2
+
+  if ! git --git-dir=.bare symbolic-ref --quiet refs/remotes/origin/HEAD >/dev/null 2>&1; then
+    local default_branch
+    default_branch=$(git --git-dir=.bare symbolic-ref --short HEAD 2>/dev/null || true)
+    if [ -n "$default_branch" ] \
+       && git --git-dir=.bare show-ref --verify --quiet "refs/remotes/origin/$default_branch"; then
+      git --git-dir=.bare symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$default_branch"
+      log "set refs/remotes/origin/HEAD -> refs/remotes/origin/$default_branch"
+    fi
+  fi
+
+  # For each existing worktree's branch, set upstream to origin/<branch> when possible.
+  while IFS='|' read -r wt_path wt_branch; do
+    [ -n "$wt_path" ] && [ -n "$wt_branch" ] || continue
+    if git --git-dir=.bare show-ref --verify --quiet "refs/remotes/origin/$wt_branch"; then
+      local current_upstream
+      current_upstream=$(git -C "$wt_path" rev-parse --abbrev-ref "$wt_branch@{upstream}" 2>/dev/null || true)
+      if [ "$current_upstream" != "origin/$wt_branch" ]; then
+        git -C "$wt_path" branch --set-upstream-to="origin/$wt_branch" "$wt_branch" 1>&2
+        log "set upstream for $wt_branch -> origin/$wt_branch ($wt_path)"
+      fi
+    fi
+  done < <(git --git-dir=.bare worktree list --porcelain | awk '
+    $1=="worktree" { path=$2 }
+    $1=="branch"   { sub("refs/heads/","",$2); print path"|"$2 }
+  ')
+}
+
+# ---- dispatcher ----------------------------------------------------------
+
+wtclone_main() {
+  case "${1:-}" in
+    -h|--help)    usage; exit 0 ;;
+    -v|--version) printf 'wtclone %s\n' "$WTCLONE_VERSION"; exit 0 ;;
+    '')           usage >&2; exit 2 ;;
+    init)         shift; cmd_init "$@" ;;
+    add)          shift; cmd_add  "$@" ;;
+    rm)           shift; cmd_rm   "$@" ;;
+    fix)          shift; cmd_fix  "$@" ;;
+    *)            cmd_init "$@" ;;   # shortcut: wtclone <url> [name]
+  esac
 }
 
 # Only run main when executed directly (not when sourced by tests).
