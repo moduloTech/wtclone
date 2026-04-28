@@ -199,6 +199,27 @@ cmd_rm() {
       unpushed=$(git -C "$wt_path" rev-list --count "$upstream..$branch" 2>/dev/null || echo 0)
       [ "$unpushed" -eq 0 ] || die "branch '$branch' has $unpushed unpushed commit(s) vs $upstream (use --force)"
     fi
+    # Gitignored entries (build artifacts, caches, vendored deps, …) pass git's
+    # cleanliness check but block the final rmdir with "Directory not empty".
+    # Surface this explicitly instead of letting the user decode git's terse error.
+    local ignored
+    ignored=$(git -C "$wt_path" ls-files --others --ignored --exclude-standard --directory 2>/dev/null || true)
+    if [ -n "$ignored" ]; then
+      {
+        printf "wtclone: worktree '%s' contains gitignored entries that 'git worktree remove' will not delete:\n" "$wt_path"
+        printf '%s\n' "$ignored" | sed 's/^/  /'
+        printf '\n'
+        printf "wtclone: 'git worktree remove' refuses to rmdir a directory that still holds these\n"
+        printf "         (it only handles tracked content + non-ignored untracked files).\n"
+        printf '\n'
+        printf "wtclone: to remove the worktree along with these entries:\n"
+        printf "    wtclone rm %s --force\n" "$branch"
+        printf '\n'
+        printf "wtclone: or clean them first, then re-run:\n"
+        printf "    git -C '%s' clean -fdX\n" "$wt_path"
+      } >&2
+      exit 1
+    fi
   fi
 
   log "removing worktree $wt_path"

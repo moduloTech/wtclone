@@ -439,6 +439,42 @@ make_v010_layout() {
   rm -rf "$src" "$dest"
 }
 
+@test "rm: refuses on gitignored entries with actionable message" {
+  local src dest
+  src=$(mktemp -d); dest=$(mktemp -d)
+  make_fixture_remote "$src"
+
+  # Track a .gitignore on staging in the source remote so the worktree starts clean.
+  git -C "$src" checkout -q staging
+  echo "/cache/" > "$src/.gitignore"
+  git -C "$src" -c user.email=t@t -c user.name=t add .gitignore
+  git -C "$src" -c user.email=t@t -c user.name=t commit -q -m "ignore cache/"
+  git -C "$src" checkout -q main
+
+  WTCLONE_ROOT="$dest" "$BIN" init "$src" proj 1>/dev/null
+  cd "$dest/proj"
+  "$BIN" add staging 1>/dev/null
+
+  # Drop an ignored entry — git status stays clean, but rmdir would fail.
+  mkdir "$dest/proj/staging/cache"
+  echo "junk" > "$dest/proj/staging/cache/file.txt"
+
+  run "$BIN" rm staging
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"gitignored entries"* ]]
+  [[ "$output" == *"cache/"* ]]
+  [[ "$output" == *"--force"* ]]
+  [[ "$output" == *"clean -fdX"* ]]
+  [ -d "$dest/proj/staging" ]
+
+  # --force bypasses the check and removes everything.
+  run "$BIN" rm staging --force
+  [ "$status" -eq 0 ]
+  [ ! -d "$dest/proj/staging" ]
+
+  rm -rf "$src" "$dest"
+}
+
 @test "rm: refuses on unpushed commits" {
   local src dest
   src=$(mktemp -d); dest=$(mktemp -d)
