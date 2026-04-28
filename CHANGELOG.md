@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-28
+
 ### Changed
 
 - `wtclone rm` now detects gitignored entries (caches, build artifacts, vendored deps) before delegating to `git worktree remove`. These pass git's cleanliness check but block the final `rmdir` with the cryptic `failed to delete '...': Directory not empty`. The new pre-check fails with a message that names the offending entries and points to the two remediation paths: `wtclone rm <branch> --force`, or `git -C <wt_path> clean -fdX` to clean first. Behavior is unchanged — `--force` still bypasses the check.

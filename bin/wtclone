@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-WTCLONE_VERSION="0.2.0"
+WTCLONE_VERSION="0.2.1"
 SAFE_FETCH_REFSPEC='+refs/heads/*:refs/remotes/origin/*'
 
 usage() {
