@@ -343,7 +343,7 @@ make_v010_layout() {
   rm -rf "$src" "$dest"
 }
 
-@test "add: refuses when branch already exists locally" {
+@test "add: refuses when branch is checked out in another worktree" {
   local src dest
   src=$(mktemp -d); dest=$(mktemp -d)
   make_fixture_remote "$src"
@@ -352,7 +352,66 @@ make_v010_layout() {
   cd "$dest/proj"
   run "$BIN" add main
   [ "$status" -ne 0 ]
-  [[ "$output" == *"already exists locally"* ]]
+  [[ "$output" == *"already checked out at"* ]]
+  [[ "$output" == *"$dest/proj/main"* ]]
+
+  rm -rf "$src" "$dest"
+}
+
+@test "add: orphan ref matching origin → suggests safe attach" {
+  local src dest
+  src=$(mktemp -d); dest=$(mktemp -d)
+  make_fixture_remote "$src"
+  WTCLONE_ROOT="$dest" "$BIN" init "$src" proj 1>/dev/null
+
+  cd "$dest/proj"
+  # Create a refs/heads/staging pointing at origin/staging, no worktree.
+  git --git-dir=.bare branch staging origin/staging
+
+  run "$BIN" add staging
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"orphan ref"* ]]
+  [[ "$output" == *"local matches origin"* ]]
+  [[ "$output" == *"git worktree add staging"* ]]
+
+  rm -rf "$src" "$dest"
+}
+
+@test "add: orphan ref diverged from origin → shows ahead/behind and both options" {
+  local src dest
+  src=$(mktemp -d); dest=$(mktemp -d)
+  make_fixture_remote "$src"
+  WTCLONE_ROOT="$dest" "$BIN" init "$src" proj 1>/dev/null
+
+  cd "$dest/proj"
+  # Orphan ref pointing at origin/main (different SHA than origin/staging).
+  git --git-dir=.bare branch staging origin/main
+
+  run "$BIN" add staging
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"orphan ref"* ]]
+  [[ "$output" == *"local and origin differ"* ]]
+  [[ "$output" == *"divergence:"* ]]
+  [[ "$output" == *"branch -D staging"* ]]
+  [[ "$output" == *"git worktree add staging"* ]]
+
+  rm -rf "$src" "$dest"
+}
+
+@test "add: orphan ref with no origin counterpart → suggests local-only attach" {
+  local src dest
+  src=$(mktemp -d); dest=$(mktemp -d)
+  make_fixture_remote "$src"
+  WTCLONE_ROOT="$dest" "$BIN" init "$src" proj 1>/dev/null
+
+  cd "$dest/proj"
+  git --git-dir=.bare branch only-local origin/main
+
+  run "$BIN" add only-local
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"orphan ref"* ]]
+  [[ "$output" == *"not on the remote"* ]]
+  [[ "$output" == *"git worktree add only-local"* ]]
 
   rm -rf "$src" "$dest"
 }

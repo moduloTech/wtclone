@@ -134,18 +134,86 @@ cmd_init() {
 
 # ---- cmd_add -------------------------------------------------------------
 
+# Print a tailored diagnosis for an existing refs/heads/<branch> that blocks
+# `wtclone add`. Distinguishes (1) checked out in another worktree, (2) orphan
+# ref matching origin, (3) orphan ref diverged from origin, (4) orphan ref with
+# no origin counterpart. Writes to stderr; caller is responsible for exit.
+diagnose_existing_branch() {
+  local branch="$1" checked_out_at
+  checked_out_at=$(git --git-dir=.bare worktree list --porcelain | awk -v b="refs/heads/$branch" '
+    $1=="worktree" { path=$2 }
+    $1=="branch" && $2==b { print path; exit }
+  ')
+  if [ -n "$checked_out_at" ]; then
+    {
+      printf "wtclone: branch '%s' is already checked out at:\n" "$branch"
+      printf "    %s\n" "$checked_out_at"
+      printf '\n'
+      printf "wtclone: a branch can only be checked out in one worktree at a time.\n"
+    } >&2
+    return
+  fi
+
+  local local_sha
+  local_sha=$(git --git-dir=.bare rev-parse --short "refs/heads/$branch")
+
+  if ! git --git-dir=.bare show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    {
+      printf "wtclone: branch '%s' exists locally with no worktree attached (orphan ref).\n" "$branch"
+      printf "    local:  refs/heads/%s @ %s\n" "$branch" "$local_sha"
+      printf "    origin: (no refs/remotes/origin/%s — branch is not on the remote)\n" "$branch"
+      printf '\n'
+      printf "wtclone: this is a local-only branch; attach it with:\n"
+      printf "    git worktree add %s\n" "$branch"
+    } >&2
+    return
+  fi
+
+  local origin_sha
+  origin_sha=$(git --git-dir=.bare rev-parse --short "refs/remotes/origin/$branch")
+  if [ "$local_sha" = "$origin_sha" ]; then
+    {
+      printf "wtclone: branch '%s' exists locally with no worktree attached (orphan ref).\n" "$branch"
+      printf "    local:  refs/heads/%s @ %s\n" "$branch" "$local_sha"
+      printf "    origin: refs/remotes/origin/%s @ %s\n" "$branch" "$origin_sha"
+      printf '\n'
+      printf "wtclone: local matches origin — safe to attach with:\n"
+      printf "    git worktree add %s\n" "$branch"
+    } >&2
+    return
+  fi
+
+  local ahead behind
+  ahead=$(git --git-dir=.bare rev-list --count "refs/remotes/origin/$branch..refs/heads/$branch" 2>/dev/null || echo "?")
+  behind=$(git --git-dir=.bare rev-list --count "refs/heads/$branch..refs/remotes/origin/$branch" 2>/dev/null || echo "?")
+  {
+    printf "wtclone: branch '%s' exists locally with no worktree attached (orphan ref).\n" "$branch"
+    printf "    local:      refs/heads/%s @ %s\n" "$branch" "$local_sha"
+    printf "    origin:     refs/remotes/origin/%s @ %s\n" "$branch" "$origin_sha"
+    printf "    divergence: %s ahead, %s behind origin/%s\n" "$ahead" "$behind" "$branch"
+    printf '\n'
+    printf "wtclone: local and origin differ. Choose:\n"
+    printf "  - attach the local branch (keeps any unpushed work):\n"
+    printf "      git worktree add %s\n" "$branch"
+    printf "  - discard the local ref and re-create from origin/%s:\n" "$branch"
+    printf "      git --git-dir=.bare branch -D %s\n" "$branch"
+    printf "      wtclone add %s\n" "$branch"
+  } >&2
+}
+
 cmd_add() {
   local branch="${1:-}" base="${2:-}"
   [ -n "$branch" ] || die "usage: wtclone add <branch> [base]"
 
   ensure_layout
 
-  if git --git-dir=.bare show-ref --verify --quiet "refs/heads/$branch"; then
-    die "branch '$branch' already exists locally; use 'git worktree add $branch' directly"
-  fi
-
   log "fetching origin"
   git --git-dir=.bare fetch origin --prune 1>&2
+
+  if git --git-dir=.bare show-ref --verify --quiet "refs/heads/$branch"; then
+    diagnose_existing_branch "$branch"
+    exit 1
+  fi
 
   if git --git-dir=.bare show-ref --verify --quiet "refs/remotes/origin/$branch"; then
     log "worktree $branch will track origin/$branch"

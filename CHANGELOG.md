@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `wtclone rm` now detects gitignored entries (caches, build artifacts, vendored deps) before delegating to `git worktree remove`. These pass git's cleanliness check but block the final `rmdir` with the cryptic `failed to delete '...': Directory not empty`. The new pre-check fails with a message that names the offending entries and points to the two remediation paths: `wtclone rm <branch> --force`, or `git -C <wt_path> clean -fdX` to clean first. Behavior is unchanged — `--force` still bypasses the check.
+- `wtclone add` now diagnoses the "branch already exists locally" failure with a tailored message per case: (1) branch checked out in another worktree (shows the worktree path); (2) orphan ref matching `origin/<branch>` (suggests the safe `git worktree add <branch>` attach); (3) orphan ref diverged from origin (reports ahead/behind counts and offers both attach-and-keep and `branch -D` + recreate paths); (4) orphan ref with no remote counterpart (suggests local-only attach). The `fetch origin` step now runs before the existing-branch check so the diagnosis works against fresh remote-tracking refs.
 
 ## [0.2.0] - 2026-04-24
 
